@@ -951,12 +951,24 @@ function printAllRecords() {
 
 function doPrint() {
   document.querySelectorAll('.view').forEach(v => v.classList.remove('printing'));
-  document.getElementById('printArea').classList.add('printing');
-  window.print();
-  setTimeout(() => {
-    document.getElementById('printArea').classList.remove('printing');
-  }, 300);
+  const printArea = document.getElementById('printArea');
+  printArea.classList.add('printing');
+
+  // Some browsers snapshot the page for printing before a same-tick display
+  // change is applied. Waiting two animation frames forces the browser to
+  // finish layout/paint with the printing class applied first.
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      window.print();
+    });
+  });
 }
+
+// Reliably clean up after the print dialog closes (works whether the user
+// prints or cancels, unlike a guessed setTimeout delay).
+window.addEventListener('afterprint', () => {
+  document.getElementById('printArea').classList.remove('printing');
+});
 
 document.getElementById('printAllBtn').addEventListener('click', printAllRecords);
 document.getElementById('syncPendingBtn').addEventListener('click', syncAllPending);
