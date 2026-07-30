@@ -322,6 +322,15 @@
   }
   .record-badge.pass{background:var(--pass-bg);color:var(--pass);}
   .record-badge.fail{background:var(--fail-bg);color:var(--fail);}
+  .sync-badge{
+    font-size:.7rem;
+    font-weight:700;
+    padding:4px 9px;
+    border-radius:20px;
+    white-space:nowrap;
+  }
+  .sync-badge.synced{background:#e6f7ee;color:var(--pass);}
+  .sync-badge.pending{background:#fff4e0;color:#a06a00;}
   .record-body{
     display:none;
     padding:14px 16px;
@@ -432,12 +441,13 @@
   <!-- HISTORY VIEW -->
   <div class="view" id="view-history">
     <div class="history-card">
-      <div class="storage-note">
-        Submission history is saved in this browser on this device (not sent anywhere). Use <strong>Export</strong> to back up or transfer records to another device, and <strong>Import</strong> to load a backup file.
+      <div class="storage-note" id="storageNote">
+        Submission history is saved in this browser on this device. Use <strong>Export</strong> to back up or transfer records to another device, and <strong>Import</strong> to load a backup file.
       </div>
       <div class="history-toolbar">
         <div class="count" id="historyCountLabel">0 submissions</div>
         <div class="history-actions">
+          <button id="syncPendingBtn">Sync Pending</button>
           <button id="exportBtn">Export All (JSON)</button>
           <button id="importBtn">Import JSON</button>
           <button id="printAllBtn">Print All</button>
@@ -490,6 +500,10 @@ const ITEMS = [
 ];
 
 const STORAGE_KEY = 'forkliftInspectionHistory_v1';
+
+// PASTE your deployed Google Apps Script Web App URL between the quotes below.
+// Leave it blank ('') to run in local-only mode (history stays on this device only).
+const BACKEND_URL = 'https://script.google.com/macros/s/AKfycbwIN49ThXMByNqv4DeY3H-bj0GU5apY8c7kkgBf5cLsLpv6cfGoG9CiRuQHCvbhSQJPow/exec';
 
 const state = {}; // id -> {status: 'pass'|'fail'|null, photos: [dataURL,...], note: ''}
 
@@ -556,6 +570,13 @@ container.addEventListener('click', (e) => {
   } else if (state[id].status === 'fail') {
     wrap.classList.add('answered-fail');
     wrap.querySelector('.fail-btn').classList.add('active');
+    // Automatically open the camera/photo picker for this item.
+    // Must fire inside this click handler (same user gesture) or mobile
+    // browsers will block it from opening automatically.
+    const photoInput = document.getElementById('photoinput_' + id);
+    if (photoInput) {
+      setTimeout(() => photoInput.click(), 50);
+    }
   }
 
   updateProgress();
@@ -714,6 +735,7 @@ document.getElementById('submitBtn').addEventListener('click', () => {
     submittedAt: new Date().toISOString(),
     unitId, inspector, date, hourMeter, generalNotes,
     overallResult: anyFail ? 'FAIL' : 'PASS',
+    synced: false,
     items: ITEMS.map((name, idx) => {
       const s = state['item_' + idx];
       return { name, status: s.status, photos: s.photos, note: s.note };
@@ -727,7 +749,69 @@ document.getElementById('submitBtn').addEventListener('click', () => {
     msg.textContent = 'Inspection recorded on screen, but could not be saved to history (storage may be full).';
   }
   updateHistoryCount();
+
+  if (BACKEND_URL) {
+    syncRecord(record).then(ok => {
+      if (ok) {
+        banner.textContent += ' (Synced to management report ✓)';
+      } else {
+        banner.textContent += ' (Could not reach the management report right now — it will retry automatically, or use "Sync Pending" in Submission History.)';
+      }
+    });
+  }
 });
+
+// ---- Backend sync (Google Apps Script) ----
+function syncRecord(record) {
+  if (!BACKEND_URL) return Promise.resolve(false);
+  return fetch(BACKEND_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // avoids a CORS preflight, which Apps Script can't handle
+    body: JSON.stringify(record)
+  })
+    .then(res => res.json())
+    .then(data => {
+      if (data && data.success) {
+        markSynced(record.id);
+        return true;
+      }
+      return false;
+    })
+    .catch(() => false);
+}
+
+function markSynced(id) {
+  const records = loadHistory();
+  const idx = records.findIndex(r => r.id === id);
+  if (idx !== -1) {
+    records[idx].synced = true;
+    saveHistory(records);
+  }
+}
+
+function syncAllPending() {
+  if (!BACKEND_URL) {
+    alert('No management report is connected yet. Add your Google Apps Script URL to BACKEND_URL in the page code first.');
+    return;
+  }
+  const records = loadHistory();
+  const pending = records.filter(r => !r.synced);
+  if (pending.length === 0) {
+    alert('Everything is already synced.');
+    return;
+  }
+  Promise.all(pending.map(r => syncRecord(r))).then(results => {
+    const okCount = results.filter(Boolean).length;
+    renderHistory();
+    alert(`Synced ${okCount} of ${pending.length} pending submission(s).`);
+  });
+}
+
+// Retry pending syncs automatically when the device comes back online
+window.addEventListener('online', () => {
+  if (BACKEND_URL) syncAllPending();
+});
+
 
 document.getElementById('resetBtn').addEventListener('click', () => {
   if (!confirm('Reset the entire form? All entries will be lost.')) return;
@@ -758,13 +842,19 @@ function renderHistory() {
     const failCount = rec.items.filter(i => i.status === 'fail').length;
     const div = document.createElement('div');
     div.className = 'record';
+    const syncBadge = BACKEND_URL
+      ? `<div class="sync-badge ${rec.synced ? 'synced' : 'pending'}">${rec.synced ? '✓ Synced' : '⏳ Not synced'}</div>`
+      : '';
     div.innerHTML = `
       <div class="record-head" data-id="${rec.id}">
         <div>
           <div class="record-title">Unit ${escapeHtml(rec.unitId)} — ${escapeHtml(rec.inspector)}</div>
           <div class="record-sub">${escapeHtml(rec.date)} • Submitted ${fmtDate(rec.submittedAt)} • ${failCount} item(s) failed</div>
         </div>
-        <div class="record-badge ${rec.overallResult === 'PASS' ? 'pass' : 'fail'}">${rec.overallResult}</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          ${syncBadge}
+          <div class="record-badge ${rec.overallResult === 'PASS' ? 'pass' : 'fail'}">${rec.overallResult}</div>
+        </div>
       </div>
       <div class="record-body" id="body_${rec.id}"></div>
     `;
@@ -869,6 +959,7 @@ function doPrint() {
 }
 
 document.getElementById('printAllBtn').addEventListener('click', printAllRecords);
+document.getElementById('syncPendingBtn').addEventListener('click', syncAllPending);
 
 // ---- Export / Import ----
 document.getElementById('exportBtn').addEventListener('click', () => {
